@@ -792,7 +792,7 @@ h1 span { color: var(--red); }
   const data = window.POET_DATA;
   const app = document.getElementById("app");
   const resumeButton = document.querySelector(".resume-button");
-  const STORAGE_KEY = "shijie-cup-v3";
+  const STORAGE_KEY = "shijie-cup-v4";
   const allPeriods = new Set(data.periodOrder);
   const allGenres = new Set(["poetry", "ci"]);
 
@@ -898,10 +898,11 @@ h1 span { color: var(--red); }
       return { key: "default48", ready: true, label: "48 → 小组24 → 复活至32 → 淘汰赛" };
     }
     if (count < 24) return { key: "tooFew", ready: false, label: `还需加入 ${24 - count} 人` };
-    if (count <= 30) return { key: "cut24", ready: true, label: `${count} → 保留24 → 淘汰赛` };
-    if (count <= 48) return { key: "groups24", ready: true, label: `${count} → 四进二小组赛 → 复活至24 → 淘汰赛` };
-    if (count <= 56) return { key: "cut48", ready: true, label: `${count} → 保留48 → 四进二小组赛 → 24强淘汰赛` };
-    if (count <= 72) return { key: "prelim48", ready: true, label: `${count} → 三进二预选 → 复活至48 → 小组赛 → 24强淘汰赛` };
+    if (count <= 31) return { key: "byes16", ready: true, label: `${count} → 自选${32 - count}人轮空 → 16强` };
+    if (count <= 47) return { key: "cut32", ready: true, label: count === 32 ? "32 → 32强淘汰赛" : `${count} → 保留32 → 32强淘汰赛` };
+    if (count === 48) return { key: "custom48", ready: true, label: "48 → 小组24 → 复活至32 → 淘汰赛" };
+    if (count <= 56) return { key: "cut48", ready: true, label: `${count} → 保留48 → 小组24 → 复活至32 → 淘汰赛` };
+    if (count <= 72) return { key: "prelim48", ready: true, label: `${count} → 三进二预选 → 复活至48 → 小组24 → 复活至32 → 淘汰赛` };
     return { key: "tooMany", ready: false, label: `需移除 ${count - 72} 人` };
   }
 
@@ -950,7 +951,7 @@ h1 span { color: var(--red); }
             </button>
           </div>
           <div class="console-route" aria-label="赛事路径">
-            <span>72</span><i></i><span>48</span><i></i><span>24</span><i></i><span>1</span>
+            <span>72</span><i></i><span>48</span><i></i><span>32</span><i></i><span>1</span>
           </div>
           <p class="console-note">名单越大，赛程越完整。24—72人均可开赛。</p>
           <p class="art-credit">画意：石涛《四季山水图》局部</p>
@@ -1047,7 +1048,7 @@ h1 span { color: var(--red); }
     if (!format.ready) return;
 
     tournament = {
-      version: 3,
+      version: 4,
       title: mode === "default" ? "古代诗（词）人" : customTitle(),
       mode,
       initialCount: entrants.length,
@@ -1059,6 +1060,7 @@ h1 span { color: var(--red); }
       prelimRevival: null,
       groupStage: null,
       groupRevival: null,
+      byeSelection: null,
       knockout: null,
       transition: null,
       champion: null,
@@ -1068,8 +1070,9 @@ h1 span { color: var(--red); }
     stageSelection.clear();
 
     if (format.key === "default48") setupGroupStage(entrants, 32);
-    if (format.key === "cut24") entrants.length === 24 ? setupKnockout(entrants) : setupCut(entrants, 24, "knockout");
-    if (format.key === "groups24") setupGroupStage(entrants, 24);
+    if (format.key === "byes16") setupKnockout(entrants);
+    if (format.key === "cut32") entrants.length === 32 ? setupKnockout(entrants) : setupCut(entrants, 32, "knockout");
+    if (format.key === "custom48") setupGroupStage(entrants, 32);
     if (format.key === "cut48") setupCut(entrants, 48, "groups");
     if (format.key === "prelim48") setupPrelim(entrants);
     saveTournament();
@@ -1117,7 +1120,7 @@ h1 span { color: var(--red); }
   function setupRevival(kind, survivors, eliminated, target) {
     const required = target - survivors.length;
     if (required <= 0) {
-      if (kind === "prelim") setupGroupStage(survivors.slice(0, target), 24);
+      if (kind === "prelim") setupGroupStage(survivors.slice(0, target), 32);
       else setupKnockout(survivors.slice(0, target));
       return;
     }
@@ -1132,9 +1135,21 @@ h1 span { color: var(--red); }
   }
 
   function setupKnockout(entrants) {
-    tournament.phase = "knockout";
     tournament.knockout = { rounds: [], currentRound: 0, currentMatch: 0 };
-    makeKnockoutRound(shuffle(entrants));
+    const ordered = shuffle(entrants);
+    const required = byeCountFor(ordered.length);
+    if (required > 0) {
+      tournament.byeSelection = { entrants: ordered, required, selected: null };
+      tournament.phase = "bye-selection";
+      return;
+    }
+    tournament.phase = "knockout";
+    makeKnockoutRound(ordered);
+  }
+
+  function byeCountFor(count) {
+    const bracketSize = 2 ** Math.ceil(Math.log2(count));
+    return bracketSize - count;
   }
 
   function distributedByePositions(matchCount, byeCount) {
@@ -1144,28 +1159,50 @@ h1 span { color: var(--red); }
     return new Set(positions);
   }
 
-  function makeKnockoutRound(entrants) {
+  function buildKnockoutRound(entrants, selectedByes = []) {
     const ordered = [...entrants];
-    const exponent = Math.ceil(Math.log2(ordered.length));
-    const bracketSize = 2 ** exponent;
+    const bracketSize = 2 ** Math.ceil(Math.log2(ordered.length));
     const matchCount = bracketSize / 2;
     const byeCount = bracketSize - ordered.length;
+    if (selectedByes.length !== byeCount) throw new Error(`Expected ${byeCount} selected byes, got ${selectedByes.length}`);
     const byePositions = distributedByePositions(matchCount, byeCount);
-    const round = { entrants: ordered, byes: [], matches: [] };
-    let cursor = 0;
+    const byeIds = new Set(selectedByes.map((poet) => poet.id));
+    const byePool = shuffle(ordered.filter((poet) => byeIds.has(poet.id)));
+    const playingPool = shuffle(ordered.filter((poet) => !byeIds.has(poet.id)));
+    const round = { entrants: [], byes: [], matches: [] };
     for (let matchIndex = 0; matchIndex < matchCount; matchIndex += 1) {
-      const a = ordered[cursor++];
       if (byePositions.has(matchIndex)) {
+        const a = byePool.shift();
+        round.entrants.push(a);
         round.byes.push(a);
         round.matches.push({ a, b: null, winner: a, automatic: true });
       } else {
-        const b = ordered[cursor++];
+        const a = playingPool.shift();
+        const b = playingPool.shift();
+        round.entrants.push(a, b);
         round.matches.push({ a, b, winner: null, automatic: false });
       }
     }
+    return round;
+  }
+
+  function makeKnockoutRound(entrants, selectedByes = []) {
+    const round = buildKnockoutRound(entrants, selectedByes);
     tournament.knockout.rounds.push(round);
     tournament.knockout.currentRound = tournament.knockout.rounds.length - 1;
     tournament.knockout.currentMatch = firstPendingMatch(round);
+  }
+
+  function confirmByes() {
+    const state = tournament.byeSelection;
+    if (!state || stageSelection.size !== state.required) return;
+    remember();
+    state.selected = state.entrants.filter((poet) => stageSelection.has(poet.id));
+    stageSelection.clear();
+    tournament.phase = "knockout";
+    makeKnockoutRound(state.entrants, state.selected);
+    saveTournament();
+    renderStage();
   }
 
   function firstPendingMatch(round) {
@@ -1240,7 +1277,7 @@ h1 span { color: var(--red); }
       `${state.eliminated.length}\u4eba\u6b62\u6b65\u540d\u5355\u88c1\u5b9a\u3002`,
       state.kept,
       state.eliminated,
-      state.next === "groups" ? { type: "groups", target: 24 } : { type: "knockout" }
+      state.next === "groups" ? { type: "groups", target: 32 } : { type: "knockout" }
     );
     saveTournament();
     renderStage();
@@ -1275,7 +1312,7 @@ h1 span { color: var(--red); }
       `${state.selected.length}\u4eba\u590d\u6d3b\u6210\u529f\uff0c${eliminated.length}\u4eba\u672c\u5c4a\u6b62\u6b65\u3002`,
       entrants,
       eliminated,
-      kind === "prelim-revival" ? { type: "groups", target: 24 } : { type: "knockout" }
+      kind === "prelim-revival" ? { type: "groups", target: 32 } : { type: "knockout" }
     );
     saveTournament();
     renderStage();
@@ -1435,6 +1472,29 @@ h1 span { color: var(--red); }
     </section>`;
   }
 
+  function renderByeSelection() {
+    const state = tournament.byeSelection;
+    const selected = stageSelection.size;
+    const playingCount = state.entrants.length - state.required;
+    const progress = Math.round((selected / state.required) * 100);
+    app.innerHTML = `<section class="stage-shell">
+      ${stageHeader("轮空选择", `选择${state.required}人轮空`, `${state.entrants.length}人中选择${state.required}人直接进入16强；其余${playingCount}人进行${playingCount / 2}场比赛。`, progress)}
+      <div class="stage-card">
+        <p class="stage-kicker">FIRST ROUND BYES</p>
+        <h2>决定轮空名单</h2>
+        <p class="stage-instruction">已选 ${selected}/${state.required} 人。轮空者直接进入16强，其余选手两两对决。</p>
+        <div class="candidate-grid">
+          ${state.entrants.map((poet, index) => candidateCard(poet, stageSelection.has(poet.id), index)).join("")}
+        </div>
+        <div class="group-footer">
+          <p>${selected === state.required ? "轮空名单已满，可以开始比赛。" : `还需选择 ${state.required - selected} 人。`}</p>
+          <button class="primary-button" type="button" data-action="confirm-byes" ${selected === state.required ? "" : "disabled"}>确认轮空名单</button>
+        </div>
+      </div>
+      ${stageActions()}
+    </section>`;
+  }
+
   function transitionPerson(poet, status) {
     return `<div class="transition-person ${status}">
       <strong>${escapeHtml(poet.name)}</strong>
@@ -1476,7 +1536,7 @@ h1 span { color: var(--red); }
     if (count === 4) return "半决赛";
     if (count === 8) return "八强赛";
     if (count === 16) return "十六强赛";
-    if (count === 24) return "二十四强赛";
+    if (count > 16 && count < 32) return "十六强资格赛";
     if (count === 32) return "三十二强赛";
     return `${count}强赛`;
   }
@@ -1535,6 +1595,11 @@ h1 span { color: var(--red); }
   function revivalSummary(title, state) {
     if (!state || !state.selected) return "";
     return `<div class="result-section"><h3>${escapeHtml(title)}</h3><p>${state.selected.map((poet) => escapeHtml(poet.name)).join("、")}</p></div>`;
+  }
+
+  function byeSummary(state) {
+    if (!state || !state.selected) return "";
+    return `<div class="result-section"><h3>首轮轮空</h3><p>${state.selected.map((poet) => escapeHtml(poet.name)).join("、")}</p></div>`;
   }
 
   function advancedIds(round) {
@@ -1608,6 +1673,7 @@ h1 span { color: var(--red); }
           <div class="bracket-wrap">${symmetricBracket(rounds)}</div>
         </div>
         ${tournament.cut && tournament.cut.kept ? `<div class="result-section"><h3>名单裁定</h3><p>保留：${tournament.cut.kept.map((poet) => escapeHtml(poet.name)).join("、")}</p></div>` : ""}
+        ${byeSummary(tournament.byeSelection)}
         ${groupSummary("预选赛", tournament.prelim)}
         ${revivalSummary("预选复活", tournament.prelimRevival)}
         ${groupSummary("小组赛", tournament.groupStage)}
@@ -1621,6 +1687,7 @@ h1 span { color: var(--red); }
     if (tournament.phase === "cut") return renderCut();
     if (tournament.phase === "prelim" || tournament.phase === "groups") return renderGroups();
     if (tournament.phase === "prelim-revival" || tournament.phase === "group-revival") return renderRevival();
+    if (tournament.phase === "bye-selection") return renderByeSelection();
     if (tournament.phase === "transition") return renderTransition();
     if (tournament.phase === "knockout") return renderKnockout();
     if (tournament.phase === "result") return renderResult();
@@ -1787,9 +1854,11 @@ h1 span { color: var(--red); }
     } else if (action === "stage-toggle") {
       const limit = tournament.phase === "cut"
         ? tournament.cut.target
+        : (tournament.phase === "bye-selection"
+          ? tournament.byeSelection.required
         : (tournament.phase.includes("revival")
           ? (tournament.phase === "prelim-revival" ? tournament.prelimRevival.required : tournament.groupRevival.required)
-          : 2);
+          : 2));
       toggleStageSelection(target.dataset.id, limit);
     } else if (action === "confirm-cut") {
       confirmCut();
@@ -1800,6 +1869,8 @@ h1 span { color: var(--red); }
       confirmGroup();
     } else if (action === "confirm-revival") {
       confirmRevival();
+    } else if (action === "confirm-byes") {
+      confirmByes();
     } else if (action === "choose") {
       chooseWinner(target.dataset.id);
     } else if (action === "continue-stage") {
@@ -1857,7 +1928,7 @@ h1 span { color: var(--red); }
     return { valid: errors.length === 0, errors, rounds: rounds.length };
   }
 
-  window.__SHIJIE_CUP_TEST__ = { formatForCount, buildGroups, validateKnockout, getTournament: () => tournament };
+  window.__SHIJIE_CUP_TEST__ = { formatForCount, buildGroups, byeCountFor, buildKnockoutRound, validateKnockout, getTournament: () => tournament };
   updateResumeButton();
   renderHome();
 })();
