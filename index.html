@@ -617,6 +617,44 @@ h1 span { color: var(--red); }
 .champion-column strong { color: var(--red); font-family: "Songti SC",SimSun,serif; font-size: 28px; }
 .empty { grid-column: 1/-1; padding: 40px; border: 1px dashed var(--line); border-radius: 8px; color: var(--muted); text-align: center; }
 .footer { display: flex; justify-content: space-between; gap: 20px; padding: 20px clamp(18px,4vw,60px); border-top: 1px solid var(--line); color: var(--muted); font-size: 11px; }
+.confirm-overlay {
+  position: fixed;
+  z-index: 1000;
+  inset: 0;
+  display: grid;
+  place-items: center;
+  padding: 20px;
+  background: rgba(25, 23, 19, .58);
+  backdrop-filter: blur(4px);
+  -webkit-backdrop-filter: blur(4px);
+}
+.confirm-overlay[hidden] { display: none; }
+.confirm-panel {
+  width: min(100%, 430px);
+  padding: 30px;
+  border: 1px solid rgba(164, 59, 50, .38);
+  border-radius: 14px;
+  background: #fffdf8;
+  box-shadow: 0 24px 70px rgba(25, 20, 15, .3);
+  text-align: center;
+}
+.confirm-kicker {
+  display: block;
+  margin-bottom: 9px;
+  color: var(--red);
+  font-size: 11px;
+  font-weight: 800;
+  letter-spacing: .2em;
+}
+.confirm-panel h2 {
+  margin: 0;
+  color: var(--ink);
+  font-family: "Songti SC", STSong, SimSun, serif;
+  font-size: clamp(22px, 4vw, 28px);
+}
+.confirm-panel p { margin: 13px 0 24px; color: var(--muted); font-size: 14px; line-height: 1.75; }
+.confirm-actions { display: grid; grid-template-columns: 1fr 1fr; gap: 12px; }
+.confirm-actions button { min-height: 46px; }
 .hidden { display: none !important; }
 
 @media (max-width: 940px) {
@@ -673,6 +711,7 @@ h1 span { color: var(--red); }
   .stat { border-right: 0; border-bottom: 1px solid var(--line); text-align: left; }
   .stat:last-child { border-bottom: 0; }
   .summary-groups { grid-template-columns: 1fr; }
+  .confirm-panel { padding: 25px 20px 20px; }
 }
 @media (prefers-reduced-motion: reduce) {
   *,*::before,*::after { scroll-behavior: auto !important; transition: none !important; }
@@ -700,6 +739,18 @@ h1 span { color: var(--red); }
     <span>首页画意与篆书字形取自公共领域馆藏</span>
     <span>离线可用 · 不收集个人信息</span>
   </footer>
+
+  <div class="confirm-overlay" data-confirm-restart hidden>
+    <section class="confirm-panel" role="alertdialog" aria-modal="true" aria-labelledby="confirm-restart-title" aria-describedby="confirm-restart-description">
+      <span class="confirm-kicker">退出比赛</span>
+      <h2 id="confirm-restart-title">是否确认放弃本次比赛？</h2>
+      <p id="confirm-restart-description">确认后，本次比赛的进度将被清除，且无法恢复。</p>
+      <div class="confirm-actions">
+        <button class="quiet-button" type="button" data-action="cancel-restart">取消</button>
+        <button class="danger-button" type="button" data-action="confirm-restart">确认</button>
+      </div>
+    </section>
+  </div>
 
   <script>
 (function () {
@@ -804,6 +855,7 @@ h1 span { color: var(--red); }
   let tournament = null;
   let stageSelection = new Set();
   let undoStack = [];
+  let restartTrigger = null;
 
   const escapeHtml = (value) =>
     String(value)
@@ -860,6 +912,33 @@ h1 span { color: var(--red); }
 
   function updateResumeButton() {
     resumeButton.classList.toggle("hidden", !loadTournament());
+  }
+
+  function showRestartConfirmation(trigger) {
+    const overlay = document.querySelector("[data-confirm-restart]");
+    if (!overlay) return;
+    restartTrigger = trigger || document.activeElement;
+    overlay.hidden = false;
+    document.body.style.overflow = "hidden";
+    overlay.querySelector('[data-action="cancel-restart"]')?.focus();
+  }
+
+  function hideRestartConfirmation() {
+    const overlay = document.querySelector("[data-confirm-restart]");
+    if (!overlay || overlay.hidden) return;
+    overlay.hidden = true;
+    document.body.style.overflow = "";
+    restartTrigger?.focus?.();
+    restartTrigger = null;
+  }
+
+  function abandonTournament() {
+    hideRestartConfirmation();
+    tournament = null;
+    stageSelection.clear();
+    undoStack = [];
+    saveTournament();
+    renderHome();
   }
 
   function remember() {
@@ -1167,8 +1246,10 @@ h1 span { color: var(--red); }
     if (selectedByes.length !== byeCount) throw new Error(`Expected ${byeCount} selected byes, got ${selectedByes.length}`);
     const byePositions = distributedByePositions(matchCount, byeCount);
     const byeIds = new Set(selectedByes.map((poet) => poet.id));
-    const byePool = shuffle(ordered.filter((poet) => byeIds.has(poet.id)));
-    const playingPool = shuffle(ordered.filter((poet) => !byeIds.has(poet.id)));
+    // The draw is shuffled once in setupKnockout. Never reshuffle between
+    // knockout rounds: adjacent winners must stay on the same bracket path.
+    const byePool = ordered.filter((poet) => byeIds.has(poet.id));
+    const playingPool = ordered.filter((poet) => !byeIds.has(poet.id));
     const round = { entrants: [], byes: [], matches: [] };
     for (let matchIndex = 0; matchIndex < matchCount; matchIndex += 1) {
       if (byePositions.has(matchIndex)) {
@@ -1620,6 +1701,42 @@ h1 span { color: var(--red); }
       .map((poet) => ({ poet, match, matchIndex: offset + index })));
   }
 
+  function orderKnockoutRounds(rounds) {
+    if (!rounds.length) return [];
+    const orderedMatches = Array(rounds.length);
+    orderedMatches[rounds.length - 1] = [...rounds.at(-1).matches];
+
+    // Rebuild the tree backwards from the final. This also repairs the
+    // presentation of tournaments completed under older versions that
+    // accidentally redrew the bracket after every round.
+    for (let roundIndex = rounds.length - 2; roundIndex >= 0; roundIndex -= 1) {
+      const desiredWinnerIds = orderedMatches[roundIndex + 1]
+        .flatMap((match) => [match.a, match.b])
+        .filter(Boolean)
+        .map((poet) => poet.id);
+      const matchesByWinner = new Map(
+        rounds[roundIndex].matches
+          .filter((match) => match.winner)
+          .map((match) => [match.winner.id, match])
+      );
+      const ordered = desiredWinnerIds.map((id) => matchesByWinner.get(id)).filter(Boolean);
+      const included = new Set(ordered);
+      orderedMatches[roundIndex] = [
+        ...ordered,
+        ...rounds[roundIndex].matches.filter((match) => !included.has(match))
+      ];
+    }
+
+    return rounds.map((round, index) => {
+      const matches = orderedMatches[index];
+      return {
+        ...round,
+        matches,
+        entrants: matches.flatMap((match) => [match.a, match.b]).filter(Boolean)
+      };
+    });
+  }
+
   function bracketNode(poet, advanced) {
     return `<div class="bracket-node ${advanced ? "advanced" : ""}">
       <span>${escapeHtml(poet.name)}</span>${advanced ? '<b>晋</b>' : ""}
@@ -1638,9 +1755,10 @@ h1 span { color: var(--red); }
   }
 
   function symmetricBracket(rounds) {
-    const left = rounds.map((round, index) => bracketStage(round, index, "left")).join("");
-    const right = rounds.map((round, index) => bracketStage(round, index, "right")).reverse().join("");
-    return `<div class="symmetric-bracket" style="--round-count:${rounds.length}">
+    const orderedRounds = orderKnockoutRounds(rounds);
+    const left = orderedRounds.map((round, index) => bracketStage(round, index, "left")).join("");
+    const right = orderedRounds.map((round, index) => bracketStage(round, index, "right")).reverse().join("");
+    return `<div class="symmetric-bracket" style="--round-count:${orderedRounds.length}">
       <div class="bracket-wing left-wing">${left}</div>
       <div class="bracket-center">
         <span class="cup-mark">诗界杯</span>
@@ -1694,7 +1812,7 @@ h1 span { color: var(--red); }
   }
 
   function downloadResult() {
-    const rounds = tournament.knockout.rounds;
+    const rounds = orderKnockoutRounds(tournament.knockout.rounds);
     const width = 1900;
     const outerCount = Math.max(sideEntries(rounds[0], "left").length, sideEntries(rounds[0], "right").length);
     const height = Math.max(1120, outerCount * 58 + 250);
@@ -1879,12 +1997,14 @@ h1 span { color: var(--red); }
       undo();
     } else if (action === "leave-game") {
       renderHome();
-    } else if (action === "restart" || action === "new-game") {
-      tournament = null;
-      stageSelection.clear();
-      undoStack = [];
-      saveTournament();
-      renderHome();
+    } else if (action === "restart") {
+      showRestartConfirmation(target);
+    } else if (action === "cancel-restart") {
+      hideRestartConfirmation();
+    } else if (action === "confirm-restart") {
+      abandonTournament();
+    } else if (action === "new-game") {
+      abandonTournament();
     } else if (action === "resume") {
       tournament = loadTournament();
       stageSelection.clear();
@@ -1893,6 +2013,14 @@ h1 span { color: var(--red); }
     } else if (action === "download") {
       downloadResult();
     }
+  });
+
+  document.addEventListener("keydown", (event) => {
+    if (event.key === "Escape") hideRestartConfirmation();
+  });
+
+  document.querySelector("[data-confirm-restart]")?.addEventListener("click", (event) => {
+    if (event.target === event.currentTarget) hideRestartConfirmation();
   });
 
   document.addEventListener("input", (event) => {
@@ -1928,7 +2056,7 @@ h1 span { color: var(--red); }
     return { valid: errors.length === 0, errors, rounds: rounds.length };
   }
 
-  window.__SHIJIE_CUP_TEST__ = { formatForCount, buildGroups, byeCountFor, buildKnockoutRound, validateKnockout, getTournament: () => tournament };
+  window.__SHIJIE_CUP_TEST__ = { formatForCount, buildGroups, byeCountFor, buildKnockoutRound, orderKnockoutRounds, validateKnockout, getTournament: () => tournament };
   updateResumeButton();
   renderHome();
 })();
